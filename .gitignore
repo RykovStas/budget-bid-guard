@@ -1,0 +1,19 @@
+# Python virtual environments
+venv/
+.venv/
+
+# Secrets and environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# PyCharm settings
+.idea/
+
+# Generated test data
+campaigns.csv
+
+# macOS
+.DS_Store
