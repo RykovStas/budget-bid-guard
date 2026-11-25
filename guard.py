@@ -148,35 +148,176 @@ Flagged campaigns (JSON):
 """
 
 
+
 def ask_llm(alerts):
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
     prompt = PROMPT.format(data=json.dumps(alerts, indent=2))
 
-    if provider == "openai" and os.getenv("OPENAI_API_KEY"):
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
-            json={"model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "temperature": 0.3,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+    try:
+        if provider == "openai" and os.getenv("OPENAI_API_KEY"):
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"
+                },
+                json={
+                    "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    "temperature": 0.3,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=60,
+            )
 
-    if provider == "gemini" and os.getenv("GEMINI_API_KEY"):
-        model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-            json={"contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096}},
-            timeout=60,
-        )
-        cand = r.json()["candidates"][0]
-        text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
-        if cand.get("finishReason") not in (None, "STOP"):
-            text += f"\n\n[note: reply was cut off, finishReason={cand.get('finishReason')}]"
-        return text
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+
+        if provider == "gemini" and os.getenv("GEMINI_API_KEY"):
+            model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/"
+                f"models/{model}:generateContent"
+            )
+
+            headers = {
+                "x-goog-api-key": os.environ["GEMINI_API_KEY"]
+            }
+
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 4096
+                }
+            }
+
+            # Retry temporary Gemini server errors
+            for attempt in range(4):
+                try:
+                    r = requests.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=60,
+                    )
+
+                    if r.status_code == 503:
+                        if attempt < 3:
+                            delay = 2 ** (attempt + 1)
+                            print(
+                                f"Gemini is overloaded (503). "
+                                f"Retrying in {delay}s... "
+                                f"Attempt {attempt + 2}/4"
+                            )
+                            time.sleep(delay)
+                            continue
+
+                        print("Gemini unavailable after 4 attempts.")
+                        return None
+
+                    if not r.ok:
+                        print("Gemini API error:", r.status_code)
+                        print("Details:", r.text)
+                        return None
+
+                    data = r.json()
+                    candidates = data.get("candidates", [])
+
+                    if not candidates:
+                        print("Gemini returned no candidates:")
+                        print(data)
+                        return None
+
+                    cand = candidates[0]
+
+                    text = "".join(
+                        p.get("text", "")
+                        for p in cand.get("content", {}).get("parts", [])
+                    )
+
+                    if not text:
+                        print("Gemini returned an empty response.")
+                        return None
+
+                    if cand.get("finishReason") not in (None, "STOP"):
+                        text += (
+                            f"\n\n[note: reply was cut off, "
+                            f"finishReason={cand.get('finishReason')}]"
+                        )
+
+                    return text
+
+                except requests.RequestException as e:
+                    if attempt < 3:
+                        delay = 2 ** (attempt + 1)
+                        print(f"Gemini connection error: {e}")
+                        print(f"Retrying in {delay}s...")
+                        time.sleep(delay)
+                    else:
+                        print("Gemini request failed after 4 attempts:", e)
+                        return None
+
+            model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={
+                    "x-goog-api-key": os.environ["GEMINI_API_KEY"]
+                },
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 4096
+                    }
+                },
+                timeout=60,
+            )
+
+            # Check whether Gemini returned an HTTP error
+            if not r.ok:
+                print("Gemini API error:", r.status_code)
+                print("Details:", r.text)
+                return None
+
+            data = r.json()
+
+            # Check whether Gemini returned candidates
+            candidates = data.get("candidates", [])
+
+            if not candidates:
+                print("Gemini returned no candidates:")
+                print(data)
+                return None
+
+            cand = candidates[0]
+
+            text = "".join(
+                p.get("text", "")
+                for p in cand.get("content", {}).get("parts", [])
+            )
+
+            if not text:
+                print("Gemini returned an empty response:")
+                print(data)
+                return None
+
+            if cand.get("finishReason") not in (None, "STOP"):
+                text += f"\n\n[note: reply was cut off, finishReason={cand.get('finishReason')}]"
+
+            return text
+
+        print("LLM provider not configured or API key missing.")
+        return None
+
+    except requests.RequestException as e:
+        print("LLM request failed:", e)
+        return None
+
+    except (ValueError, KeyError, IndexError) as e:
+        print("LLM response parsing failed:", e)
+        return None
+
 
 
 def plain_summary(alerts):
